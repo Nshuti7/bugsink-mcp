@@ -1,82 +1,146 @@
 # bugsink-mcp
 
-A hosted MCP server exposing your self-hosted [Bugsink](https://www.bugsink.com/) error tracker (at `bugsink.example.com`) as tools Claude can call directly — list issues, pull stacktraces, resolve/mute issues, tag releases.
+> A hosted **[Model Context Protocol](https://modelcontextprotocol.io/)** server that exposes your self-hosted [Bugsink](https://www.bugsink.com/) error tracker as tools an LLM (Claude, or anything else speaking MCP) can call directly.
 
-Bugsink isn't in Cowork's connector registry (it's self-hosted, so there's no shared OAuth endpoint to register), so this runs as its own small service — the same shape as hosted MCP servers like `mcp.vercel.com` or `mcp.render.com`, just deployed by you instead of a vendor. Claude connects to it over `POST /mcp`; this service makes the actual HTTPS calls to your Bugsink instance using your API token.
+[![Node](https://img.shields.io/badge/node-%E2%89%A518-brightgreen)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/typescript-strict-blue)](https://www.typescriptlang.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
+List issues, pull stacktraces, resolve or mute noise, tag releases — all from a chat prompt, without the LLM ever touching your Bugsink credentials directly.
+
+---
+
+## Table of contents
+
+- [Why this exists](#why-this-exists)
+- [What it covers](#what-it-covers)
+- [Quick start](#quick-start)
+- [Deploying](#deploying)
+- [Registering with Claude (or another MCP client)](#registering-with-claude-or-another-mcp-client)
+- [Security posture](#security-posture)
+- [Configuration reference](#configuration-reference)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Why this exists
+
+Bugsink is a self-hosted, single-tenant error tracker, so it isn't in Claude's public connector registry (there's no shared OAuth endpoint to register). That leaves two options:
+
+1. **stdio MCP server** — Claude spawns the process locally per session. Works, but every machine needs the binary and env vars.
+2. **hosted (Streamable HTTP) MCP server** — same shape as `mcp.vercel.com` or `mcp.render.com`, just deployed by you. Register once by URL and any Claude client can call it.
+
+This project is option 2. You deploy it (Docker, VPS, one small container) and point Claude at `https://mcp.yourdomain.tld/mcp`. Claude never sees your Bugsink API token — this service holds it, translates MCP tool calls into REST calls, and streams the results back.
 
 ## What it covers
 
 Every read/write endpoint in Bugsink's public API (`/api/canonical/0/*`):
 
-- **Teams & projects** — `list_teams`, `list_projects`, `get_project`
-- **Issues** — `list_issues`, `get_issue`, `add_issue_comment`, `resolve_issue` (now / on latest release / on next release), `mute_issue` (indefinite / for a period / until an event threshold), `unmute_issue`, `delete_issue`
-- **Events** — `list_events`, `get_event`, `get_event_stacktrace` (the rendered, readable version — usually more useful than the raw JSON)
-- **Releases** — `list_releases`, `create_release`, `get_release`
+| Area | Tools |
+|---|---|
+| **Teams & projects** | `list_teams`, `list_projects`, `get_project` |
+| **Issues** | `list_issues`, `get_issue`, `add_issue_comment`, `resolve_issue` (now / on latest release / on next release), `mute_issue` (indefinite / for a period / until an event threshold), `unmute_issue`, `delete_issue` |
+| **Events** | `list_events`, `get_event`, `get_event_stacktrace` (the rendered readable version — usually more useful than the raw JSON) |
+| **Releases** | `list_releases`, `create_release`, `get_release` |
 
-## Security posture — read this before deploying
+Each tool's input schema is declared with [zod](https://zod.dev/), so the MCP SDK rejects malformed calls before your handler runs.
 
-This endpoint has **no authentication of its own**. Whoever can reach the URL can call every tool above against your real Bugsink instance, including `delete_issue`. That was your call, and it's a reasonable one if:
+## Quick start
 
-- the URL isn't linked from anywhere public, and
-- you're comfortable with "security through obscurity + it's just my own data" for this particular service.
-
-The cheapest mitigation that doesn't touch any code: an IP allowlist at the Traefik layer (a commented-out example is in `docker-compose.yml`). If you ever want real auth without much effort, the natural next step is checking a shared-secret header (e.g. `X-MCP-Token`) at the top of the `/mcp` handler in `src/index.ts` before it does anything else — a few lines, not a redesign.
-
-## Get your Bugsink API token
-
-In your Bugsink instance, go to your account/API settings and create a token. Same "token" concept as a Sentry SDK DSN, but this one authenticates the *management* API, not event ingestion.
-
-## Local development
+Requirements: **Node ≥ 18**, **pnpm ≥ 9**, and an API token from your Bugsink instance (Account settings → API tokens).
 
 ```bash
+git clone https://github.com/Nshuti7/bugsink-mcp.git
+cd bugsink-mcp
 pnpm install
 pnpm run build
-cp .env.example .env    # fill in your real token
+
+cp .env.example .env         # fill in BUGSINK_BASE_URL and BUGSINK_TOKEN
 node --env-file=.env dist/index.js
 ```
 
-It should print `bugsink-mcp listening on port 8787`. Sanity check with:
+You should see `bugsink-mcp listening on port 8787`. Verify with:
 
 ```bash
 curl http://localhost:8787/healthz   # -> "ok"
 ```
 
-## Deploying with Docker
+For a live-rebuild dev loop:
 
 ```bash
-BUGSINK_TOKEN=your-real-token docker compose up -d --build
+pnpm run dev        # tsc --watch in one terminal
+node --env-file=.env --watch dist/index.js   # in another
 ```
 
-`docker-compose.yml` assumes you already have a Traefik instance running on this VPS (the same one fronting SkillSwap) with an external network called `web`. Adjust the `entrypoints` / `certresolver` names in the labels to match your actual Traefik config, and swap `mcp.example.com` for whichever subdomain you want to use.
+## Deploying
 
-If you'd rather run it without Traefik for now, drop the `labels`/`networks` blocks and add a straight `ports: ["8787:8787"]` mapping instead.
+### Docker Compose (recommended)
 
-## Pushing this to GitHub
-
-No GitHub tool was available to push this for you automatically this session (the connector never finished authorizing), so do it from your machine:
+The bundled `docker-compose.yml` assumes you already run [Traefik](https://traefik.io/) on the same host with an external network called `web`. Adjust the labels to match your setup, then:
 
 ```bash
-cd bugsink-mcp
-git init
-git add .
-git commit -m "Initial commit: Bugsink MCP server"
-git branch -M main
-git remote add origin git@github.com:<your-username>/bugsink-mcp.git
-git push -u origin main
+export BUGSINK_TOKEN=your-real-token
+docker compose up -d --build
 ```
 
-Create the empty repo on GitHub first (via the website, or `gh repo create bugsink-mcp --public --source=. --remote=origin` if you have the `gh` CLI). The `.gitignore` already excludes `node_modules`, `dist`, and `.env`, so your token won't end up in the repo as long as it only ever lives in `.env` or your deploy environment's variables — never commit it directly into `docker-compose.yml` or any other tracked file.
+### Docker without Traefik
 
-## Registering it with Claude
+Drop the `labels` and `networks` blocks and add a direct port mapping:
 
-Once deployed, this becomes a **remote** MCP server (URL-based), not a local one — register it the same way you would any hosted MCP endpoint:
+```yaml
+    ports:
+      - "8787:8787"
+```
+
+### Any other platform
+
+It's a plain Node HTTP server on `$PORT` (default `8787`). Anything that can run a container or a Node process will host it — Fly.io, Render, Railway, a bare VPS with `pm2`, etc. There's no persistent state, so you can scale it horizontally without coordination.
+
+## Registering with Claude (or another MCP client)
+
+Once your instance is reachable over HTTPS:
 
 ```bash
-claude mcp add --transport http bugsink https://mcp.example.com/mcp
+claude mcp add --transport http bugsink https://mcp.yourdomain.tld/mcp
 ```
 
-Or via Cowork/Claude Desktop's connector settings, if there's a "custom connector by URL" option there.
+Or use Claude Desktop / Cowork's "custom connector by URL" setting if available. The endpoint speaks standard Streamable HTTP MCP, so [any compliant client](https://modelcontextprotocol.io/clients) will work.
 
-## Why a bearer token to Bugsink, but no OAuth
+## Security posture
 
-Registry connectors like Vercel or GitHub use OAuth because they're multi-tenant SaaS — Claude needs to prove *which* account it's acting as. Your Bugsink instance is single-tenant (just you), so a static bearer token is the simpler, correct primitive for the Bugsink side — it's exactly what Bugsink's own docs recommend for their API. The *this service's own endpoint* auth question is separate (see "Security posture" above) and currently unimplemented, by choice.
+**Read this before deploying.** The `/mcp` endpoint has **no authentication of its own**. Whoever can reach the URL can call every tool, including `delete_issue`. Two ways to handle that:
+
+- **IP allowlist at Traefik** (cheapest, no code) — an example is commented into `docker-compose.yml`. Restrict to your home/office IP plus wherever your MCP client's egress comes from.
+- **Shared-secret header** (code change) — check `req.headers['x-mcp-token']` at the top of the `/mcp` handler in [`src/index.ts`](src/index.ts) before doing anything else. A few lines, not a redesign. PRs for a first-class implementation of this are welcome — see [Contributing](#contributing).
+
+The Bugsink API token itself lives only in this service's environment. It's never sent to the LLM, never logged, never persisted to disk.
+
+## Configuration reference
+
+| Env var | Required | Default | Purpose |
+|---|---|---|---|
+| `BUGSINK_BASE_URL` | ✅ | — | Root URL of your Bugsink instance, e.g. `https://bugsink.example.com` |
+| `BUGSINK_TOKEN` | ✅ | — | Bugsink API token (Account settings → API tokens) |
+| `PORT` | | `8787` | HTTP port the MCP server binds to |
+
+Missing `BUGSINK_BASE_URL` or `BUGSINK_TOKEN` fails fast on startup with a clear message.
+
+## Contributing
+
+Contributions are welcome — issues, PRs, docs fixes, new tools, security hardening, all of it. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) for the ground rules and dev loop.
+
+Good first PRs, if you're looking for ideas:
+
+- Add a shared-secret auth middleware for the `/mcp` endpoint (opt-in via env var)
+- Cover any Bugsink endpoints that get added upstream
+- A GitHub Actions workflow that runs `pnpm run build` on PRs
+- Example client scripts (curl / Python / TS) that exercise the MCP endpoint end-to-end
+- Structured logging with request IDs
+
+Have an idea that's not on the list? Open an issue first so we can align on the shape before you write code.
+
+## License
+
+[MIT](LICENSE) © contributors
