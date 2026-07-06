@@ -1,18 +1,19 @@
-# Meant to sit alongside your existing SkillSwap-style Traefik setup on the
-# same VPS: this defines the service and its routing rule, and assumes a
-# Traefik instance with an entrypoint named "websecure" and a certresolver
-# named "le" already exists on an external network called "web" (adjust the
-# names below to match whatever your actual Traefik instance uses).
+# Meant to sit alongside an existing Traefik setup on the same host: this
+# defines the service and its routing rule, and assumes a Traefik instance
+# with an entrypoint named "websecure" and a certresolver named "le"
+# already exists on an external network called "web" (adjust the names
+# below to match whatever your actual Traefik instance uses).
 #
-# Replace "mcp.example.com" with whatever subdomain you actually want to
-# point at this — it doesn't need to be a Bugsink-branded name.
+# Replace "mcp.example.com" with whatever subdomain you want to point at
+# this — it doesn't need to be a Bugsink-branded name. BUGSINK_BASE_URL
+# and MCP_AUTH_TOKEN come from your shell env (see .env.example).
 
 services:
   bugsink-mcp:
     build: .
     restart: unless-stopped
     environment:
-      BUGSINK_BASE_URL: https://bugsink.example.com
+      BUGSINK_BASE_URL: ${BUGSINK_BASE_URL}
       BUGSINK_TOKEN: ${BUGSINK_TOKEN}
       # Strongly recommended for any public deployment. Generate with
       # `openssl rand -hex 32` and export MCP_AUTH_TOKEN before `docker compose up`.
