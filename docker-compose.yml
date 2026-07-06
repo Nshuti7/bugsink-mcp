@@ -1,0 +1,35 @@
+# Meant to sit alongside your existing SkillSwap-style Traefik setup on the
+# same VPS: this defines the service and its routing rule, and assumes a
+# Traefik instance with an entrypoint named "websecure" and a certresolver
+# named "le" already exists on an external network called "web" (adjust the
+# names below to match whatever your actual Traefik instance uses).
+#
+# Replace "mcp.example.com" with whatever subdomain you actually want to
+# point at this — it doesn't need to be a Bugsink-branded name.
+
+services:
+  bugsink-mcp:
+    build: .
+    restart: unless-stopped
+    environment:
+      BUGSINK_BASE_URL: https://bugsink.example.com
+      BUGSINK_TOKEN: ${BUGSINK_TOKEN}
+    networks:
+      - web
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.bugsink-mcp.rule=Host(`mcp.example.com`)
+      - traefik.http.routers.bugsink-mcp.entrypoints=websecure
+      - traefik.http.routers.bugsink-mcp.tls.certresolver=le
+      - traefik.http.services.bugsink-mcp.loadbalancer.server.port=8787
+      #
+      # Optional cheap safety net (commented out): restrict who can reach
+      # this at all, independent of anything in the app itself. Uncomment
+      # and fill in your own IP(s)/CIDR to allowlist, e.g. your home/office
+      # IP and wherever Claude's egress comes from.
+      # - traefik.http.middlewares.bugsink-mcp-allowlist.ipallowlist.sourcerange=203.0.113.0/24
+      # - traefik.http.routers.bugsink-mcp.middlewares=bugsink-mcp-allowlist
+
+networks:
+  web:
+    external: true
