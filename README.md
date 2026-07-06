@@ -110,12 +110,34 @@ Or use Claude Desktop / Cowork's "custom connector by URL" setting if available.
 
 ## Security posture
 
-**Read this before deploying.** The `/mcp` endpoint has **no authentication of its own**. Whoever can reach the URL can call every tool, including `delete_issue`. Two ways to handle that:
+**Read this before deploying.** Two layers matter:
 
-- **IP allowlist at Traefik** (cheapest, no code) — an example is commented into `docker-compose.yml`. Restrict to your home/office IP plus wherever your MCP client's egress comes from.
-- **Shared-secret header** (code change) — check `req.headers['x-mcp-token']` at the top of the `/mcp` handler in [`src/index.ts`](src/index.ts) before doing anything else. A few lines, not a redesign. PRs for a first-class implementation of this are welcome — see [Contributing](#contributing).
+### 1. Authentication on `/mcp` (opt-in bearer token)
 
-The Bugsink API token itself lives only in this service's environment. It's never sent to the LLM, never logged, never persisted to disk.
+Set `MCP_AUTH_TOKEN` to any random string (e.g. `openssl rand -hex 32`) and every `/mcp` request must present:
+
+```
+Authorization: Bearer <that-same-string>
+```
+
+Requests without a matching token get `401 Unauthorized`. The comparison is timing-safe.
+
+When you register the server with Claude, pass the header:
+
+```bash
+claude mcp add --transport http bugsink https://mcp.yourdomain.tld/mcp \
+  --header "Authorization: Bearer $MCP_AUTH_TOKEN"
+```
+
+If `MCP_AUTH_TOKEN` is unset, the endpoint is open — fine for local dev, **not fine for a public URL**. The process logs a warning at startup in that case.
+
+### 2. Defense in depth at the proxy layer
+
+Even with a token, an IP allowlist at Traefik (or your reverse proxy) is a cheap extra layer — a commented example is in `docker-compose.yml`. Restrict to your MCP client's egress plus your own IPs.
+
+### On the Bugsink token
+
+The Bugsink API token lives only in this service's environment. It's never sent to the LLM, never logged, never persisted to disk.
 
 ## Configuration reference
 
@@ -123,9 +145,10 @@ The Bugsink API token itself lives only in this service's environment. It's neve
 |---|---|---|---|
 | `BUGSINK_BASE_URL` | ✅ | — | Root URL of your Bugsink instance, e.g. `https://bugsink.example.com` |
 | `BUGSINK_TOKEN` | ✅ | — | Bugsink API token (Account settings → API tokens) |
+| `MCP_AUTH_TOKEN` | recommended | — | Shared-secret bearer token for `/mcp`. Unset = open endpoint (dev only). See [Security posture](#security-posture). |
 | `PORT` | | `8787` | HTTP port the MCP server binds to |
 
-Missing `BUGSINK_BASE_URL` or `BUGSINK_TOKEN` fails fast on startup with a clear message.
+Missing `BUGSINK_BASE_URL` or `BUGSINK_TOKEN` fails fast on startup with a clear message. Missing `MCP_AUTH_TOKEN` starts fine but logs a warning.
 
 ## Contributing
 
@@ -133,11 +156,11 @@ Contributions are welcome — issues, PRs, docs fixes, new tools, security harde
 
 Good first PRs, if you're looking for ideas:
 
-- Add a shared-secret auth middleware for the `/mcp` endpoint (opt-in via env var)
 - Cover any Bugsink endpoints that get added upstream
 - A GitHub Actions workflow that runs `pnpm run build` on PRs
 - Example client scripts (curl / Python / TS) that exercise the MCP endpoint end-to-end
 - Structured logging with request IDs
+- Rate limiting on `/mcp` as an additional abuse-mitigation layer
 
 Have an idea that's not on the list? Open an issue first so we can align on the shape before you write code.
 

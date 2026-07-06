@@ -17,12 +17,12 @@
  * `createMcpServer()` below rather than at the top level — every request
  * gets its own isolated instance.
  *
- * Security note: per your call, this endpoint has no auth of its own — it's
- * open to whatever can reach the port. Anyone with the URL can list, mute,
- * resolve, or delete issues on your real Bugsink instance. If you want a
- * cheap safety net later without touching this file, add a Traefik
- * middleware (IP allowlist or basic auth) in front of it — see the
- * docker-compose labels in README.md.
+ * Auth: the endpoint is gated by an optional shared-secret bearer token
+ * (env var MCP_AUTH_TOKEN). When set, callers must present
+ * `Authorization: Bearer <token>` on every /mcp POST. When unset, the
+ * endpoint is open (matches the original behavior — kept opt-in so upgrading
+ * doesn't lock existing deployments out). Either way, an IP allowlist at the
+ * proxy layer is still a good defense-in-depth layer; see docker-compose.yml.
  *
  * Each `server.registerTool(...)` call maps one Bugsink REST endpoint to one
  * callable tool. The `inputSchema` (a zod object) is what lets Claude know
@@ -31,6 +31,7 @@
  * reaches the handler.
  */
 
+import { timingSafeEqual } from "node:crypto";
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -284,6 +285,36 @@ server.registerTool(
 
 const PORT = Number(process.env.PORT ?? 8787);
 
+/**
+ * Optional shared-secret gate on the /mcp endpoint. When MCP_AUTH_TOKEN is set,
+ * every /mcp request must present `Authorization: Bearer <token>` matching it.
+ * When unset, the endpoint is open (matches prior behavior — deliberately
+ * opt-in so existing deployments don't break on upgrade).
+ *
+ * The compare uses timingSafeEqual so a byte-by-byte early return on a
+ * mismatch can't leak the token via response-time differences.
+ */
+const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
+const MCP_AUTH_TOKEN_BUF = MCP_AUTH_TOKEN ? Buffer.from(MCP_AUTH_TOKEN, "utf8") : null;
+
+function isAuthorized(req: express.Request): boolean {
+  if (!MCP_AUTH_TOKEN_BUF) return true;
+  const header = req.headers.authorization;
+  if (typeof header !== "string" || !header.startsWith("Bearer ")) return false;
+  const presented = Buffer.from(header.slice("Bearer ".length), "utf8");
+  if (presented.length !== MCP_AUTH_TOKEN_BUF.length) return false;
+  return timingSafeEqual(presented, MCP_AUTH_TOKEN_BUF);
+}
+
+function unauthorized(res: express.Response) {
+  res.setHeader("WWW-Authenticate", 'Bearer realm="bugsink-mcp"');
+  res.status(401).json({
+    jsonrpc: "2.0",
+    error: { code: -32001, message: "Unauthorized" },
+    id: null,
+  });
+}
+
 const app = express();
 app.use(express.json());
 
@@ -293,6 +324,10 @@ app.use(express.json());
  * no session bookkeeping to get wrong.
  */
 app.post("/mcp", async (req, res) => {
+  if (!isAuthorized(req)) {
+    unauthorized(res);
+    return;
+  }
   try {
     const server = createMcpServer();
     const transport = new StreamableHTTPServerTransport({
@@ -335,4 +370,10 @@ app.get("/healthz", (_req, res) => res.status(200).send("ok"));
 
 app.listen(PORT, () => {
   console.log(`bugsink-mcp listening on port ${PORT}`);
+  if (!MCP_AUTH_TOKEN) {
+    console.warn(
+      "[warn] MCP_AUTH_TOKEN is not set — /mcp is open to anyone who can reach this port. " +
+        "Set MCP_AUTH_TOKEN or restrict access at the proxy layer (see README)."
+    );
+  }
 });
