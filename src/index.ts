@@ -287,23 +287,47 @@ const PORT = Number(process.env.PORT ?? 8787);
 
 /**
  * Optional shared-secret gate on the /mcp endpoint. When MCP_AUTH_TOKEN is set,
- * every /mcp request must present `Authorization: Bearer <token>` matching it.
- * When unset, the endpoint is open (matches prior behavior — deliberately
- * opt-in so existing deployments don't break on upgrade).
+ * every /mcp request must present the token as *either*:
+ *   - `Authorization: Bearer <token>` (preferred, RFC 6750-clean), or
+ *   - `?token=<token>` query param
  *
- * The compare uses timingSafeEqual so a byte-by-byte early return on a
- * mismatch can't leak the token via response-time differences.
+ * The query-param path exists so this server works with MCP client UIs that
+ * only let you paste a URL (e.g. Cowork's "add custom connector" dialog),
+ * with no way to attach a custom header. The token is only visible to
+ * whoever already holds the URL, and this process doesn't log request URLs
+ * — so the leakage vectors RFC 6750 warns about (access logs, referer
+ * headers, browser history) don't apply to this deployment shape. Prefer
+ * the header form when your client supports it.
+ *
+ * When MCP_AUTH_TOKEN is unset, the endpoint is open (matches prior
+ * behavior — kept opt-in so upgrading doesn't lock existing deployments
+ * out). Comparisons use timingSafeEqual so a byte-by-byte early return
+ * can't leak the token via response-time differences.
  */
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
 const MCP_AUTH_TOKEN_BUF = MCP_AUTH_TOKEN ? Buffer.from(MCP_AUTH_TOKEN, "utf8") : null;
 
+function tokensMatch(presented: string): boolean {
+  if (!MCP_AUTH_TOKEN_BUF) return true;
+  const buf = Buffer.from(presented, "utf8");
+  if (buf.length !== MCP_AUTH_TOKEN_BUF.length) return false;
+  return timingSafeEqual(buf, MCP_AUTH_TOKEN_BUF);
+}
+
 function isAuthorized(req: express.Request): boolean {
   if (!MCP_AUTH_TOKEN_BUF) return true;
+
   const header = req.headers.authorization;
-  if (typeof header !== "string" || !header.startsWith("Bearer ")) return false;
-  const presented = Buffer.from(header.slice("Bearer ".length), "utf8");
-  if (presented.length !== MCP_AUTH_TOKEN_BUF.length) return false;
-  return timingSafeEqual(presented, MCP_AUTH_TOKEN_BUF);
+  if (typeof header === "string" && header.startsWith("Bearer ")) {
+    return tokensMatch(header.slice("Bearer ".length));
+  }
+
+  const queryToken = req.query.token;
+  if (typeof queryToken === "string") {
+    return tokensMatch(queryToken);
+  }
+
+  return false;
 }
 
 function unauthorized(res: express.Response) {

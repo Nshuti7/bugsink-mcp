@@ -100,34 +100,47 @@ It's a plain Node HTTP server on `$PORT` (default `8787`). Anything that can run
 
 ## Registering with Claude (or another MCP client)
 
-Once your instance is reachable over HTTPS:
+Once your instance is reachable over HTTPS, register it however your client prefers:
 
-```bash
-claude mcp add --transport http bugsink https://mcp.yourdomain.tld/mcp
-```
-
-Or use Claude Desktop / Cowork's "custom connector by URL" setting if available. The endpoint speaks standard Streamable HTTP MCP, so [any compliant client](https://modelcontextprotocol.io/clients) will work.
-
-## Security posture
-
-**Read this before deploying.** Two layers matter:
-
-### 1. Authentication on `/mcp` (opt-in bearer token)
-
-Set `MCP_AUTH_TOKEN` to any random string (e.g. `openssl rand -hex 32`) and every `/mcp` request must present:
-
-```
-Authorization: Bearer <that-same-string>
-```
-
-Requests without a matching token get `401 Unauthorized`. The comparison is timing-safe.
-
-When you register the server with Claude, pass the header:
+**Claude CLI** (uses the header form of the token):
 
 ```bash
 claude mcp add --transport http bugsink https://mcp.yourdomain.tld/mcp \
   --header "Authorization: Bearer $MCP_AUTH_TOKEN"
 ```
+
+**Cowork / Claude Desktop → "Add custom connector"** — this UI only has a URL field, so use the query-string form:
+
+- **Name:** anything you like, e.g. `Bugsink`
+- **URL:** `https://mcp.yourdomain.tld/mcp?token=<your-MCP_AUTH_TOKEN>`
+- Leave the OAuth Client ID / Client Secret fields blank — this server uses a static shared secret, not OAuth 2.0.
+
+The endpoint speaks standard Streamable HTTP MCP, so [any compliant client](https://modelcontextprotocol.io/clients) will work.
+
+## Security posture
+
+**Read this before deploying.** Two layers matter:
+
+### 1. Authentication on `/mcp` (opt-in shared secret)
+
+Set `MCP_AUTH_TOKEN` to any random string (e.g. `openssl rand -hex 32`) and every `/mcp` request must present the token in one of two ways:
+
+**Header (preferred, RFC 6750-clean)** — works with the Claude CLI and anything else that lets you attach custom headers:
+
+```bash
+claude mcp add --transport http bugsink https://mcp.yourdomain.tld/mcp \
+  --header "Authorization: Bearer $MCP_AUTH_TOKEN"
+```
+
+**Query string** — works with UIs that only take a URL (Cowork's "Add custom connector" dialog, Claude Desktop's connector-by-URL, etc.):
+
+```
+https://mcp.yourdomain.tld/mcp?token=<your-MCP_AUTH_TOKEN>
+```
+
+Both paths use the same timing-safe comparison; either satisfies the gate. Requests presenting neither (or a wrong value) get `401 Unauthorized`.
+
+**Why offer the query-string form at all?** RFC 6750 discourages tokens in URLs because they can leak via server access logs, referer headers, or browser history. None of those apply here: this URL is only ever POST'd by an MCP client (never navigated in a browser), and this process runs no request-logging middleware. The security model is the same as the header form — whoever has the URL can call the tools — just shifted into the URL itself. Prefer the header when your client supports it.
 
 If `MCP_AUTH_TOKEN` is unset, the endpoint is open — fine for local dev, **not fine for a public URL**. The process logs a warning at startup in that case.
 
